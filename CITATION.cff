@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "Si utilizas este software, por favor cítalo como se indica a continuación."
+title: "Generador de Coeficientes de Wilson de la SMEFT"
+abstract: >-
+  Interfaz en Wolfram Mathematica que identifica de forma automática los
+  coeficientes de Wilson de la SMEFT relevantes para un observable, sobre
+  FeynArts, FeynCalc y el modelo SMEFTsim (variante topU3l).
+type: software
+authors:
+  - family-names: "Carrión Castro"
+    given-names: "Rubén"
+    affiliation: "Universidad de Córdoba"
+version: "1.0"
+date-released: "2026-06-08"
+url: "https://github.com/USUARIO/InterfazWilson"
+repository-code: "https://github.com/USUARIO/InterfazWilson"
+license: MIT
+keywords:
+  - SMEFT
+  - "Wilson coefficients"
+  - FeynCalc
+  - FeynArts
+  - SMEFTsim
+  - "Mathematica"
+# Cuando tengas DOI de Zenodo, descomenta y rellena:
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXX"
+#     description: "DOI de la versión archivada en Zenodo"
