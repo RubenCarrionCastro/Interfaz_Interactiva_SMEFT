@@ -7,6 +7,7 @@
 
    Archivo ASCII para evitar problemas de codificacion en Windows.
    No modifica ninguna interfaz. Solo define datos y funciones auxiliares.
+   Revision: tablas y exportaciones simplificadas; se ocultan Class, Translation type/Kind y Notes.
 *)
 
 ClearAll[
@@ -21,6 +22,7 @@ ClearAll[
   untranslatedWCs,
   wcCoverageReport,
   exportWCTranslationsCSV,
+  exportWCTranslationsTeX,
   translateLastWCResult,
   allSMEFTsimKnownWCs,
   allTranslationTargets
@@ -219,7 +221,10 @@ addTranslationRow["general", "cHq1Re33", "dim6top", "cpQ3 + cpQM", "L7", "invers
 
 wcTranslations[] := $SMEFTsimWCTranslations;
 
-wcTranslationsDataset[] := Dataset[$SMEFTsimWCTranslations];
+wcTranslationsDataset[] := Dataset[$SMEFTsimWCTranslations][
+  All,
+  {"SMEFTsimModel", "SMEFTsim", "Target", "TargetExpression", "Aliases"}
+];
 
 allSMEFTsimKnownWCs[] := Sort @ DeleteDuplicates @ Flatten[
   Join[
@@ -284,10 +289,446 @@ exportWCTranslationsCSV[path_:Automatic] := Module[{out},
     path
   ];
   Export[out,
-    Normal[$SMEFTsimWCTranslations] /. a_Association :> KeyDrop[a, "Aliases"],
+    Normal[$SMEFTsimWCTranslations] /. a_Association :> KeyDrop[a, {"Aliases", "Class", "Kind", "Notes"}],
     "CSV"
   ];
   out
+];
+
+(* ========================================================= *)
+(* 5.1 Export of translation tables to a standalone .tex     *)
+(*     This helper does not require the Wilson-coefficient UI. *)
+(* ========================================================= *)
+
+ClearAll[
+  exportWCTranslationsTeX,
+  smeftsimTexDefaultDirectoryFA,
+  smeftsimTexEscapeTextFA,
+  smeftsimTexMathCellFA,
+  smeftsimTexMathListCellFA,
+  smeftsimTexTableRowFA,
+  smeftsimTexColumnSpecFA,
+  smeftsimTexLongTableFA,
+  smeftsimTexInputNamesFA,
+  smeftsimTexGoodRowsFA,
+  smeftsimTexTargetCellFA,
+  smeftsimTexTargetIsTextQFA,
+  smeftsimTexSummaryRowsFA,
+  smeftsimTexDetailedRowsFA,
+  smeftsimTexDocumentFA
+];
+
+Options[exportWCTranslationsTeX] = {
+  "Target" -> All,
+  "TableType" -> "Summary",
+  "Title" -> "SMEFTsim Wilson-coefficient translations",
+  "IncludePreamble" -> True
+};
+
+exportWCTranslationsTeX::badtype =
+  "Unknown TableType `1`. Use \"Summary\", \"Detailed\" or \"Both\".";
+
+smeftsimTexDefaultDirectoryFA[] := Module[{nbDir, sourceDir},
+  nbDir = Quiet @ Check[NotebookDirectory[], $Failed];
+  sourceDir = Quiet @ Check[DirectoryName[$InputFileName], $Failed];
+
+  Which[
+    StringQ[nbDir] && DirectoryQ[nbDir], nbDir,
+    StringQ[sourceDir] && sourceDir =!= "" && DirectoryQ[sourceDir], sourceDir,
+    True, Directory[]
+  ]
+];
+
+(* Escape ordinary text fields only. Mathematical entries are already LaTeX. *)
+smeftsimTexEscapeTextFA[value_] := Module[{s},
+  s = StringTrim @ StringReplace[ToString[value], WhitespaceCharacter .. -> " "];
+  StringReplace[s, {
+    "\\" -> "\\textbackslash{}",
+    "&" -> "\\&",
+    "%" -> "\\%",
+    "$" -> "\\$",
+    "#" -> "\\#",
+    "_" -> "\\_",
+    "{" -> "\\{",
+    "}" -> "\\}",
+    "~" -> "\\textasciitilde{}",
+    "^" -> "\\textasciicircum{}"
+  }]
+];
+
+smeftsimTexMathCellFA[value_] := Module[{s},
+  s = StringTrim @ ToString[value];
+  If[s === "" || s === "-" || s === "Not found",
+    "--",
+    "\\(\\displaystyle " <> s <> "\\)"
+  ]
+];
+
+smeftsimTexMathListCellFA[values_List] := Module[{clean},
+  clean = DeleteDuplicates @ Select[
+    StringTrim @ ToString[#] & /@ values,
+    # =!= "" && # =!= "-" && # =!= "Not found" &
+  ];
+
+  If[clean === {},
+    "--",
+    StringRiffle[smeftsimTexMathCellFA /@ clean, "\\par "]
+  ]
+];
+
+smeftsimTexTableRowFA[cells_List] :=
+  StringRiffle[cells, " & "] <> " \\\\";
+
+smeftsimTexColumnSpecFA["Summary", nTargets_Integer?NonNegative] :=
+  StringRiffle[
+    Join[
+      {"L{2.3cm}", "L{5.0cm}", "L{0.8cm}", "L{1.7cm}"},
+      ConstantArray["L{3.4cm}", nTargets]
+    ],
+    " "
+  ];
+
+smeftsimTexColumnSpecFA["Detailed", _Integer?NonNegative] :=
+  StringRiffle[
+    {
+      "L{2.4cm}", "L{5.2cm}", "L{2.2cm}", "L{6.5cm}"
+    },
+    " "
+  ];
+
+smeftsimTexLongTableFA[headers_List, rows_List, caption_, label_, columnSpec_] :=
+ Module[{headerLine, nColumns, firstHead, laterHead, foot, endFoot},
+
+  nColumns = Length[headers];
+  headerLine = smeftsimTexTableRowFA[
+    ("\\textbf{" <> smeftsimTexEscapeTextFA[#] <> "}" &) /@ headers
+  ];
+
+  firstHead = {
+    "\\caption{" <> smeftsimTexEscapeTextFA[caption] <> "}\\label{" <> label <> "}\\\\",
+    "\\toprule",
+    headerLine,
+    "\\midrule",
+    "\\endfirsthead"
+  };
+
+  laterHead = {
+    "\\multicolumn{" <> ToString[nColumns] <>
+      "}{l}{\\small\\itshape Continuation of the previous page}\\\\",
+    "\\toprule",
+    headerLine,
+    "\\midrule",
+    "\\endhead"
+  };
+
+  foot = {
+    "\\midrule",
+    "\\multicolumn{" <> ToString[nColumns] <>
+      "}{r}{\\small\\itshape Continued on the next page}\\\\",
+    "\\endfoot"
+  };
+
+  endFoot = {
+    "\\bottomrule",
+    "\\endlastfoot"
+  };
+
+  StringRiffle[
+    Join[
+      {"\\begin{longtable}{" <> columnSpec <> "}"},
+      firstHead,
+      laterHead,
+      foot,
+      endFoot,
+      rows,
+      {"\\end{longtable}"}
+    ],
+    "\n"
+  ]
+];
+
+smeftsimTexInputNamesFA[wcs_] := If[wcs === All,
+  DeleteDuplicates @ Lookup[$SMEFTsimWCTranslations, "SMEFTsim", {}],
+  DeleteDuplicates @ (wcToString /@ Flatten[{wcs}])
+];
+
+smeftsimTexGoodRowsFA[wc_, target_:All] := Select[
+  If[target === All,
+    translateFromSMEFTsim[wc],
+    translateFromSMEFTsim[wc, target]
+  ],
+  ! KeyExistsQ[#, "Status"] &
+];
+
+smeftsimTexTargetIsTextQFA[row_Association] :=
+  StringContainsQ[Lookup[row, "Kind", ""], "not-mapped", IgnoreCase -> True];
+
+smeftsimTexTargetCellFA[wc_, target_String] := Module[{rows, latex, textValues},
+  rows = smeftsimTexGoodRowsFA[wc, target];
+
+  If[rows === {}, Return["--"]];
+
+  If[AllTrue[rows, smeftsimTexTargetIsTextQFA],
+    textValues = DeleteDuplicates @ Lookup[rows, "TargetExpression", "--"];
+    Return[smeftsimTexEscapeTextFA @ StringRiffle[textValues, " | "]]
+  ];
+
+  latex = Lookup[addLatexColumnsFA /@ rows, "TargetLaTeX", ""];
+  smeftsimTexMathListCellFA[latex]
+];
+
+smeftsimTexSummaryRowsFA[names_List, targets_List] := Table[
+  Module[{goodRows, full, cells},
+
+    goodRows = smeftsimTexGoodRowsFA[name];
+
+    If[goodRows === {},
+      cells = Join[
+        {
+          smeftsimTexMathCellFA[latexExprFA[name]],
+          "--",
+          "--",
+          "--"
+        },
+        ConstantArray["--", Length[targets]]
+      ],
+
+      full = addFullInfoColumnsFA[First[goodRows]];
+
+      cells = Join[
+        {
+          smeftsimTexMathCellFA[Lookup[full, "SMEFTsimLaTeX", latexExprFA[name]]],
+          smeftsimTexMathCellFA[Lookup[full, "OperatorLaTeX", "-"]],
+          smeftsimTexEscapeTextFA[Lookup[full, "OperatorDimension", "-"]],
+          smeftsimTexMathCellFA[Lookup[full, "LambdaOrder", "-"]]
+        },
+        (smeftsimTexTargetCellFA[name, #] &) /@ targets
+      ]
+    ];
+
+    smeftsimTexTableRowFA[cells]
+  ],
+  {name, names}
+];
+
+smeftsimTexDetailedRowsFA[names_List, target_:All] := Module[{rows},
+  rows = Flatten[
+    If[target === All,
+      translateFromSMEFTsim /@ names,
+      translateFromSMEFTsim[#, target] & /@ names
+    ],
+    1
+  ];
+
+  (
+    Module[{row = #, full},
+      smeftsimTexTableRowFA[
+        If[KeyExistsQ[row, "Status"],
+          {
+            smeftsimTexMathCellFA[latexExprFA @ Lookup[row, "SMEFTsim", "-"]],
+            "--",
+            "--",
+            smeftsimTexEscapeTextFA[Lookup[row, "Hint", "Not found in this translation file."]]
+          },
+
+          full = addFullInfoColumnsFA[row];
+          {
+            smeftsimTexMathCellFA[Lookup[full, "SMEFTsimLaTeX", "-"]],
+            smeftsimTexMathCellFA[Lookup[full, "OperatorLaTeX", "-"]],
+            smeftsimTexEscapeTextFA[Lookup[full, "Target", "-"]],
+            If[
+              smeftsimTexTargetIsTextQFA[row],
+              smeftsimTexEscapeTextFA[Lookup[full, "TargetExpression", "-"]],
+              smeftsimTexMathCellFA[Lookup[full, "TargetLaTeX", "-"]]
+            ]
+          }
+        ]
+      ]
+    ] &
+  ) /@ rows
+];
+
+smeftsimTexDocumentFA[tables_List, title_, includePreamble_] := Module[{body},
+  body = StringRiffle[tables, "\n\n\\clearpage\n\n"];
+
+  If[TrueQ[includePreamble],
+    StringRiffle[
+      {
+        "\\documentclass[10pt,a4paper]{article}",
+        "\\usepackage[T1]{fontenc}",
+        "\\usepackage[utf8]{inputenc}",
+        "\\usepackage[spanish]{babel}",
+        "\\usepackage{amsmath,amssymb}",
+        "\\usepackage{array}",
+        "\\usepackage{booktabs}",
+        "\\usepackage{longtable}",
+        "\\usepackage{pdflscape}",
+        "\\usepackage[margin=1.4cm]{geometry}",
+        "\\newcolumntype{L}[1]{>{\\raggedright\\arraybackslash}p{#1}}",
+        "\\setlength\\LTleft{0pt}",
+        "\\setlength\\LTright{0pt}",
+        "\\begin{document}",
+        "\\begin{landscape}",
+        "\\scriptsize",
+        "\\setlength{\\tabcolsep}{3pt}",
+        "\\renewcommand{\\arraystretch}{1.15}",
+        "\\begin{center}\\textbf{" <> smeftsimTexEscapeTextFA[title] <> "}\\end{center}",
+        body,
+        "\\end{landscape}",
+        "\\end{document}"
+      },
+      "\n"
+    ],
+
+    StringRiffle[
+      {
+        "% Required packages: amsmath, amssymb, array, booktabs, longtable, pdflscape.",
+        "\\begin{landscape}",
+        "\\scriptsize",
+        "\\setlength{\\tabcolsep}{3pt}",
+        "\\renewcommand{\\arraystretch}{1.15}",
+        body,
+        "\\end{landscape}"
+      },
+      "\n"
+    ]
+  ]
+];
+
+(* 
+  Main usage:
+    exportWCTranslationsTeX[{"ctWRe", "cHQ3"}, "tabla.tex"]
+    exportWCTranslationsTeX[lastWCNames, "resultado.tex", "TableType" -> "Both"]
+    exportWCTranslationsTeX[All, "traducciones_completas.tex", "TableType" -> "Detailed"]
+
+  The function only needs the list of WC names. It does not require lastWCNames
+  or any symbol defined by the user interface.
+*)
+exportWCTranslationsTeX[wcs_:All, path_:Automatic, OptionsPattern[]] := Module[
+  {
+    names, target, targets, tableType, title, includePreamble, tables = {},
+    out, outDir, summaryHeaders, detailedHeaders, defaultName
+  },
+
+  target = OptionValue["Target"];
+  tableType = ToLowerCase @ ToString @ OptionValue["TableType"];
+  tableType = Replace[tableType, {
+    "resumen" -> "summary",
+    "detalle" -> "detailed",
+    "detail" -> "detailed",
+    "ambas" -> "both",
+    "todas" -> "both",
+    "all" -> "both"
+  }];
+
+  If[! MemberQ[{"summary", "detailed", "both"}, tableType],
+    Message[exportWCTranslationsTeX::badtype, OptionValue["TableType"]];
+    Return[$Failed]
+  ];
+
+  names = smeftsimTexInputNamesFA[wcs];
+  target = If[target === All, All, ToString[target]];
+  targets = If[target === All, allTranslationTargets[], {target}];
+  title = OptionValue["Title"];
+  includePreamble = TrueQ[OptionValue["IncludePreamble"]];
+
+  If[MemberQ[{"summary", "both"}, tableType],
+    summaryHeaders = Join[
+      {
+        "SMEFTsim",
+        "Operator",
+        "Dim.",
+        "Lambda order"
+      },
+      targets
+    ];
+
+    AppendTo[
+      tables,
+      smeftsimTexLongTableFA[
+        summaryHeaders,
+        smeftsimTexSummaryRowsFA[names, targets],
+        "Summary of Wilson-coefficient translations",
+        "tab:smeftsim-wc-summary",
+        smeftsimTexColumnSpecFA["Summary", Length[targets]]
+      ]
+    ]
+  ];
+
+  If[MemberQ[{"detailed", "both"}, tableType],
+    detailedHeaders = {
+      "SMEFTsim",
+      "Operator",
+      "Target",
+      "Target expression"
+    };
+
+    AppendTo[
+      tables,
+      smeftsimTexLongTableFA[
+        detailedHeaders,
+        smeftsimTexDetailedRowsFA[names, target],
+        "Detailed Wilson-coefficient translation table",
+        "tab:smeftsim-wc-detailed",
+        smeftsimTexColumnSpecFA["Detailed", Length[targets]]
+      ]
+    ]
+  ];
+
+  defaultName = "SMEFTsim_WC_traducciones_" <> tableType <> ".tex";
+  out = If[path === Automatic,
+    FileNameJoin[{smeftsimTexDefaultDirectoryFA[], defaultName}],
+    ToString[path]
+  ];
+
+  If[ToLowerCase[FileExtension[out]] =!= "tex", out = out <> ".tex"];
+
+  outDir = DirectoryName[out];
+  If[
+    StringQ[outDir] && outDir =!= "" && outDir =!= "." && ! DirectoryQ[outDir],
+    CreateDirectory[outDir, CreateIntermediateDirectories -> True]
+  ];
+
+  Export[
+    out,
+    smeftsimTexDocumentFA[tables, title, includePreamble],
+    "Text"
+  ];
+
+  out
+];
+
+ClearAll[wcTranslationLaTeXAuditFA];
+
+(* Static presentation audit: all mathematical source/target expressions used
+   by the translation rows should have an exact LaTeX entry.  "not-mapped"
+   entries are intentionally text and are excluded from the mathematical list. *)
+wcTranslationLaTeXAuditFA[] := Module[
+  {rows, mapKeys, sourceExpressions, targetExpressions, textTargetRows,
+   missingSource, missingTarget},
+
+  rows = $SMEFTsimWCTranslations;
+  mapKeys = Keys[$SMEFTsimLatexExactMap];
+  sourceExpressions = DeleteDuplicates @ Lookup[rows, "SMEFTsim", {}];
+  textTargetRows = Select[rows,
+    StringContainsQ[Lookup[#, "Kind", ""], "not-mapped", IgnoreCase -> True] &
+  ];
+  targetExpressions = DeleteDuplicates @ Complement[
+    Lookup[rows, "TargetExpression", {}],
+    Lookup[textTargetRows, "TargetExpression", {}]
+  ];
+
+  missingSource = Complement[sourceExpressions, mapKeys];
+  missingTarget = Complement[targetExpressions, mapKeys];
+
+  <|
+    "TranslationRows" -> Length[rows],
+    "SourceExpressions" -> Length[sourceExpressions],
+    "MathematicalTargetExpressions" -> Length[targetExpressions],
+    "MissingSourceLaTeX" -> missingSource,
+    "MissingTargetLaTeX" -> missingTarget,
+    "PassedQ" -> (missingSource === {} && missingTarget === {})
+  |>
 ];
 
 translateLastWCResult[target_:All] := Which[
@@ -393,66 +834,84 @@ $SMEFTsimLatexExactMap = <|
 (* --------------------------------------------------------- *)
 (* Revision bibliografica SMEFTsim -> SMEFT@NLO              *)
 (* Fuente: SMEFTsim 3.0 practical guide, App. E.2,           *)
-(* Tables 28-31. Estas reglas solo corrigen la visualizacion *)
-(* LaTeX/MaTeX de nombres SMEFT@NLO; no cambian la tabla     *)
-(* algebraica de traduccion.                                 *)
+(* Tables 28-31. Estas reglas corrigen exclusivamente la     *)
+(* visualizacion LaTeX; no modifican la tabla algebraica.    *)
+(* Cada barra de TeX se escribe como \\ en el codigo WL.       *)
 (* --------------------------------------------------------- *)
 $SMEFTsimLatexExactMap = Join[$SMEFTsimLatexExactMap, <|
   (* SMEFT@NLO: bosonic and Higgs-sector parameters, Tables 28 and 30 *)
-  "-gs*cG" -> "-g_s\,c_G",
+  "-gs*cG" -> "-g_s\\,c_G",
   "-cWWW" -> "-c_{WWW}",
-  "cp" -> "c_{\varphi}",
-  "cdp" -> "c_{\varphi\Box}",
-  "cpDC" -> "c_{\varphi D}",
-  "cpG" -> "c_{\varphi G}",
-  "cpW" -> "c_{\varphi W}",
-  "cpBB" -> "c_{\varphi B}",
-  "cpWB" -> "c_{\varphi WB}",
+  "cp" -> "c_{\\varphi}",
+  "cdp" -> "c_{\\varphi\\Box}",
+  "cpDC" -> "c_{\\varphi D}",
+  "cpG" -> "c_{\\varphi G}",
+  "cpW" -> "c_{\\varphi W}",
+  "cpBB" -> "c_{\\varphi B}",
+  "cpWB" -> "c_{\\varphi WB}",
 
   (* SMEFT@NLO: top Yukawa and dipoles, Tables 28-31 *)
-  "ctp" -> "c_{t\varphi}",
-  "-gs*ctG" -> "-g_s\,c_{tG}",
+  "ctp" -> "c_{t\\varphi}",
+  "-gs*ctG" -> "-g_s\\,c_{tG}",
   "-ctW" -> "-c_{tW}",
   "ctZ" -> "c_{tZ}",
-  "ctZ/sTheta - ctW/tTheta" -> "\frac{c_{tZ}}{s_\theta}-\frac{c_{tW}}{t_\theta}",
+  "ctZ/sTheta - ctW/tTheta" -> "\\frac{c_{tZ}}{s_\\theta}-\\frac{c_{tW}}{t_\\theta}",
 
-  (* SMEFT@NLO: heavy/light quark EW-current rotations, Table 29 *)
-  "cpQ3" -> "c_{\varphi Q}^{(3)}",
-  "cpQM" -> "c_{\varphi Q}^{-}",
-  "cpQ3 + cpQM" -> "c_{\varphi Q}^{(3)}+c_{\varphi Q}^{-}",
-  "cpq3i" -> "c_{\varphi q}^{(3),i}",
-  "cpqMi" -> "c_{\varphi q}^{-,i}",
-  "cpq3i + cpqMi" -> "c_{\varphi q}^{(3),i}+c_{\varphi q}^{-,i}",
-  "cpt" -> "c_{\varphi t}",
-  "cpu" -> "c_{\varphi u}",
-  "cpd" -> "c_{\varphi d}",
+  (* dim6top CP-odd dipoles and inverse neutral-dipole rotation *)
+  "-ctG" -> "-c_{tG}",
+  "-ctGI" -> "-c_{tG}^{\\mathrm{Im}}",
+  "-ctWI" -> "-c_{tW}^{\\mathrm{Im}}",
+  "ctZI" -> "c_{tZ}^{\\mathrm{Im}}",
+  "ctZI/sTheta - ctWI/tTheta" -> "\\frac{c_{tZ}^{\\mathrm{Im}}}{s_\\theta}-\\frac{c_{tW}^{\\mathrm{Im}}}{t_\\theta}",
+
+  (* SMEFT@NLO and dim6top heavy/light quark EW-current rotations, Table 29 *)
+  "cpQ3" -> "c_{\\varphi Q}^{(3)}",
+  "cpQM" -> "c_{\\varphi Q}^{-}",
+  "cpQ3 + cpQM" -> "c_{\\varphi Q}^{(3)}+c_{\\varphi Q}^{-}",
+  "cpq3i" -> "c_{\\varphi q}^{(3),i}",
+  "cpqMi" -> "c_{\\varphi q}^{-,i}",
+  "cpq3i + cpqMi" -> "c_{\\varphi q}^{(3),i}+c_{\\varphi q}^{-,i}",
+  "cpt" -> "c_{\\varphi t}",
+  "cpu" -> "c_{\\varphi u}",
+  "cpd" -> "c_{\\varphi d}",
+  "cpb" -> "c_{\\varphi b}",
+  "cptb" -> "c_{\\varphi tb}",
+  "cptbI" -> "c_{\\varphi tb}^{\\mathrm{Im}}",
 
   (* SMEFT@NLO: leptonic current parameters, Table 28 *)
-  "cpe" -> "c_{\varphi e}",
-  "cpmu" -> "c_{\varphi \mu}",
-  "cpta" -> "c_{\varphi \tau}",
-  "cpe = cpmu = cpta" -> "c_{\varphi e}=c_{\varphi \mu}=c_{\varphi \tau}",
-  "cpl[p]" -> "c_{\varphi l}^{(1),p}",
-  "c3pl[p]" -> "c_{\varphi l}^{(3),p}",
+  "cpe" -> "c_{\\varphi e}",
+  "cpmu" -> "c_{\\varphi \\mu}",
+  "cpta" -> "c_{\\varphi \\tau}",
+  "cpe = cpmu = cpta" -> "c_{\\varphi e}=c_{\\varphi \\mu}=c_{\\varphi \\tau}",
+  "cpl[p]" -> "c_{\\varphi l}^{(1),p}",
+  "c3pl[p]" -> "c_{\\varphi l}^{(3),p}",
 
-  (* SMEFT@NLO: four-lepton and semileptonic topU3l entries, Tables 28-29 *)
+  (* Four-lepton and semileptonic topU3l entries, Tables 28-29 *)
   "cll[pppp] = cll[pprr]" -> "c_{ll}^{pppp}=c_{ll}^{pprr}",
   "cll[pppp] = cll[prrp]" -> "c_{ll}^{pppp}=c_{ll}^{prrp}",
   "cte[p]" -> "c_{te}^{p}",
   "cQe[p]" -> "c_{Qe}^{p}",
   "ctl[p]" -> "c_{lt}^{p}",
+  "cbe[p]" -> "c_{be}^{p}",
+  "cbl[p]" -> "c_{bl}^{p}",
   "cQl3[p]" -> "c_{lQ}^{(3),p}",
   "cQlM[p]" -> "c_{lQ}^{-,p}",
   "cQl3[p] + cQlM[p]" -> "c_{lQ}^{(3),p}+c_{lQ}^{-,p}",
 
-  (* SMEFT@NLO: scalar/tensor entries with explicit lepton Yukawa, Table 28 *)
-  "yl[3]*ctlS3" -> "y_l^{3}\,c_{lt}^{S,3}",
-  "yl[3]*ctlT3" -> "y_l^{3}\,c_{lt}^{T,3}",
-  "yl[3]*cblS3" -> "y_l^{3}\,c_{bl}^{S,3}",
+  (* Scalar/tensor entries, including the explicit tau Yukawa in SMEFT@NLO *)
+  "yl[3]*ctlS3" -> "y_l^{3}\\,c_{lt}^{S,3}",
+  "yl[3]*ctlT3" -> "y_l^{3}\\,c_{lt}^{T,3}",
+  "yl[3]*cblS3" -> "y_l^{3}\\,c_{bl}^{S,3}",
+  "ctlS3" -> "c_{lt}^{S,3}",
+  "ctlT3" -> "c_{lt}^{T,3}",
+  "cblS3" -> "c_{bl}^{S,3}",
+  "ctlSI3" -> "c_{lt}^{S,3,\\mathrm{Im}}",
+  "ctlTI3" -> "c_{lt}^{T,3,\\mathrm{Im}}",
+  "cblSI3" -> "c_{bl}^{S,3,\\mathrm{Im}}",
 
-  (* SMEFT@NLO: normalization factors and common four-quark names, Table 28 *)
-  "1/2*cQQ1" -> "\frac{1}{2}c_{QQ}^{1}",
-  "1/2*cQQ8" -> "\frac{1}{2}c_{QQ}^{8}",
+  (* Normalization factors and common four-quark names *)
+  "1/2*cQQ1" -> "\\frac{1}{2}c_{QQ}^{1}",
+  "1/2*cQQ8" -> "\\frac{1}{2}c_{QQ}^{8}",
   "cQQ1" -> "c_{QQ}^{1}",
   "cQQ8" -> "c_{QQ}^{8}",
   "cQq11" -> "c_{Qq}^{11}",
@@ -472,9 +931,33 @@ $SMEFTsimLatexExactMap = Join[$SMEFTsimLatexExactMap, <|
   "cQd8" -> "c_{Qd}^{8}",
   "ctq1" -> "c_{tq}^{1}",
   "ctq8" -> "c_{tq}^{8}",
-  "ctlS3" -> "c_{lt}^{S,3}",
-  "ctlT3" -> "c_{lt}^{T,3}",
-  "cblS3" -> "c_{bl}^{S,3}"
+  "ctb1" -> "c_{tb}^{1}",
+  "ctb8" -> "c_{tb}^{8}",
+  "cQb1" -> "c_{Qb}^{1}",
+  "cQb8" -> "c_{Qb}^{8}",
+
+  (* Names that occur in the Fierz/basis-rotation rows of dim6top. *)
+  "cbtud1" -> "c_{btud}^{(1)}",
+  "cbtud8" -> "c_{btud}^{(8)}",
+  "ctQqu1" -> "c_{tQqu}^{(1)}",
+  "ctQqu8" -> "c_{tQqu}^{(8)}",
+  "cbQqd1" -> "c_{bQqd}^{(1)}",
+
+  (* Canonical SMEFTsim-general source combinations. *)
+  "cHq1Re33" -> "C_{\\varphi q}^{(1),33}",
+  "cHq3Re33" -> "C_{\\varphi q}^{(3),33}",
+  "cHq3Re[rr]" -> "C_{\\varphi q}^{(3),rr}",
+  "cHq1Re33 - cHq3Re33" -> "C_{\\varphi q}^{(1),33}-C_{\\varphi q}^{(3),33}",
+  "cHq1Re[rr] - cHq3Re[rr]" -> "C_{\\varphi q}^{(1),rr}-C_{\\varphi q}^{(3),rr}",
+  "-cuWRe33*cTheta + cuBRe33*sTheta" -> "-c_{\\theta}C_{uW}^{33}+s_{\\theta}C_{uB}^{33}",
+  "cuBRe33" -> "C_{uB}^{33}",
+
+  (* Explicit Fierz combinations from the dim6top translation table. *)
+  "1/3*cutbd1Re + 4/9*cutbd8Re*yu[r]*yd[s]" -> "\\frac{1}{3}C_{utbd}^{(1),\\mathrm{Re}}+\\frac{4}{9}C_{utbd}^{(8),\\mathrm{Re}}y_u^r y_d^s",
+  "2*cutbd1Re - 1/3*cutbd8Re*yu[r]*yd[s]" -> "2C_{utbd}^{(1),\\mathrm{Re}}-\\frac{1}{3}C_{utbd}^{(8),\\mathrm{Re}}y_u^r y_d^s",
+  "-(2/3)*cjQtu1Re - (8/9)*cjQtu8Re*yu[r]" -> "-\\frac{2}{3}C_{jQtu}^{(1),\\mathrm{Re}}-\\frac{8}{9}C_{jQtu}^{(8),\\mathrm{Re}}y_u^r",
+  "-4*cjQtu1Re + (2/3)*cjQtu8Re*yu[r]" -> "-4C_{jQtu}^{(1),\\mathrm{Re}}+\\frac{2}{3}C_{jQtu}^{(8),\\mathrm{Re}}y_u^r",
+  "-(2/3)*cjQbd1Re - (8/9)*cjQbd8Re*yd[r]" -> "-\\frac{2}{3}C_{jQbd}^{(1),\\mathrm{Re}}-\\frac{8}{9}C_{jQbd}^{(8),\\mathrm{Re}}y_d^r"
 |>];
 
 latexExactLookupFA[s_String] := Lookup[$SMEFTsimLatexExactMap, StringTrim[s], Missing["NotFound"]];
@@ -513,7 +996,7 @@ addLatexColumnsFA[row_Association] := Join[
 
 wcTranslationsDatasetLatex[] := Dataset[addLatexColumnsFA /@ $SMEFTsimWCTranslations][
   All,
-  {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}
+  {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX"}
 ];
 
 translateFromSMEFTsimLatex[wc_, target_:All] := Module[{rows},
@@ -523,13 +1006,13 @@ translateFromSMEFTsimLatex[wc_, target_:All] := Module[{rows},
 
 translateFromSMEFTsimLatexTable[wc_, target_:All] := Dataset[translateFromSMEFTsimLatex[wc, target]][
   All,
-  {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}
+  {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX"}
 ];
 
 translateWCListLatexTable[wcs_List, target_:All] := Module[{names, rows},
   names = wcToString /@ wcs;
   rows = Flatten[translateFromSMEFTsimLatex[#, target] & /@ names, 1];
-  Dataset[rows][All, {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}]
+  Dataset[rows][All, {"SMEFTsim", "SMEFTsimLaTeX", "Target", "TargetExpression", "TargetLaTeX"}]
 ];
 
 exportWCTranslationsLatexCSV[path_:Automatic] := Module[{out, rows},
@@ -555,12 +1038,15 @@ ClearAll[
   smeftsimResetMaTeXCheck,
   nativeLatexSymbolStringFA,
   nativeSuperscriptStringFA,
+  nativeLatexReadBracedFA,
+  nativeLatexFractionPartsFA,
   topLevelSplitFA,
   nativeLatexAtomFA,
   nativeLatexProductFA,
   nativeLatexSumFA,
   nativeLatexFormulaFA,
   renderWCNotationFA,
+  renderTranslationTargetFA,
   translationRowsWithLatexFA,
   translationRowsRenderedFA,
   translateFromSMEFTsimRenderedTable,
@@ -600,12 +1086,26 @@ nativeLatexSymbolStringFA[s_String] := StringReplace[StringTrim[s], {
    "\\phi" -> "\[Phi]",
    "\\theta" -> "\[Theta]",
    "\\Theta" -> "\[CapitalTheta]",
+   "\\Lambda" -> "\[CapitalLambda]",
+   "\\mu" -> "\[Mu]",
+   "\\tau" -> "\[Tau]",
+   "\\epsilon" -> "\[Epsilon]",
+   "\\sigma" -> "\[Sigma]",
+   "\\gamma" -> "\[Gamma]",
+   "\\nu" -> "\[Nu]",
+   "\\rho" -> "\[Rho]",
    "\\Box" -> "\[Square]",
    "\\mathrm{Im}" -> "Im",
    "\\mathrm{Re}" -> "Re",
    "\\dagger" -> "\[Dagger]",
-   "\\bar" -> "bar",
-   "\\," -> "",
+   "\\bar" -> "bar ",
+   "\\tilde" -> "tilde ",
+   "\\," -> " ",
+   "\\!" -> "",
+   "\\;" -> " ",
+   "\\:" -> " ",
+   "\\quad" -> " ",
+   "\\displaystyle" -> "",
    "\\ " -> " ",
    "{" -> "",
    "}" -> ""
@@ -619,6 +1119,56 @@ nativeSuperscriptStringFA[s_String] := Module[{t},
      "\\mathrmIm" -> "Im"
   }];
   t
+];
+
+(* Read one balanced {...} group. It is deliberately small and self-contained,
+   because the fallback renderer only needs the subset of TeX used here. *)
+nativeLatexReadBracedFA[s_String, start_Integer] := Module[
+  {chars = Characters[s], n = StringLength[s], i = start, depth = 0, out = "", ch},
+
+  If[i > n || chars[[i]] =!= "{", Return[$Failed]];
+
+  Do[
+    ch = chars[[i]];
+    Which[
+      ch === "{",
+        depth++;
+        If[depth > 1, out = out <> ch],
+      ch === "}",
+        depth--;
+        If[depth == 0, Return[<|"Content" -> out, "NextIndex" -> i + 1|>]];
+        out = out <> ch,
+      True,
+        out = out <> ch
+    ],
+    {i, start, n}
+  ];
+
+  $Failed
+];
+
+(* Parse a leading \frac{numerator}{denominator}, preserving any suffix such as
+   \frac{1}{2}c_{QQ}^{1}. *)
+nativeLatexFractionPartsFA[s_String] := Module[{t, first, second, p},
+  t = StringTrim[s];
+  If[! StringStartsQ[t, "\\frac{"], Return[$Failed]];
+
+  first = nativeLatexReadBracedFA[t, StringLength["\\frac"] + 1];
+  If[first === $Failed, Return[$Failed]];
+
+  p = first["NextIndex"];
+  second = nativeLatexReadBracedFA[t, p];
+  If[second === $Failed, Return[$Failed]];
+
+  <|
+    "Numerator" -> first["Content"],
+    "Denominator" -> second["Content"],
+    "Suffix" -> If[
+      second["NextIndex"] > StringLength[t],
+      "",
+      StringTrim @ StringTake[t, {second["NextIndex"], -1}]
+    ]
+  |>
 ];
 
 topLevelSplitFA[s_String, ops_List] := Module[
@@ -650,12 +1200,39 @@ topLevelSplitFA[s_String, ops_List] := Module[
 ];
 
 nativeLatexAtomFA[s_String] := Module[
-  {t, m, base, sub, sup, expr},
+  {t, m, base, sub, sup, expr, frac, fracBox, suffix},
 
   t = StringTrim[s];
   If[t === "" || t === "-", Return["-"]];
 
-  (* Coeficientes tipo C_{\varphi q}^{(1)}, c_{tZ}, c_{\varphi q}^{3,i}, etc. *)
+  (* Fractions occur in the ctB/ctBI inverse rotations and in normalization
+     factors. Handle them before token-level parsing. *)
+  frac = nativeLatexFractionPartsFA[t];
+  If[AssociationQ[frac],
+    fracBox = FractionBox[
+      ToBoxes[nativeLatexFormulaFA[frac["Numerator"]], StandardForm],
+      ToBoxes[nativeLatexFormulaFA[frac["Denominator"]], StandardForm]
+    ];
+    suffix = frac["Suffix"];
+    Return[
+      If[suffix === "",
+        fracBox,
+        Row[{fracBox, " ", nativeLatexProductFA[suffix]}]
+      ]
+    ]
+  ];
+
+  (* A standalone Lambda power is used in the order column. *)
+  m = StringCases[t,
+    RegularExpression["^\\\\Lambda\\^\\{([^{}]+)\\}$"] :> {"$1"}
+  ];
+  If[m =!= {},
+    Return[TraditionalForm[
+      Superscript[Style[\[CapitalLambda], Italic], Style[nativeSuperscriptStringFA[First @ First[m]], Italic]]
+    ]]
+  ];
+
+  (* Coefficients such as C_{\varphi q}^{(1)}, c_{tZ}, c_{\varphi q}^{3,i}. *)
   m = StringCases[t,
     RegularExpression["^([A-Za-z]+)_\\{([^{}]+)\\}(\\^\\{([^{}]+)\\})?$"] :>
       {"$1", "$2", "$4"}
@@ -673,7 +1250,7 @@ nativeLatexAtomFA[s_String] := Module[
     Return[TraditionalForm[expr]];
   ];
 
-  (* Simbolos con subindice simple tipo c_W, s_W, g_s. *)
+  (* Symbols with a simple subscript, e.g. c_W, s_W, g_s. *)
   m = StringCases[t,
     RegularExpression["^([A-Za-z]+)_([A-Za-z0-9]+)$"] :>
       {"$1", "$2"}
@@ -684,7 +1261,7 @@ nativeLatexAtomFA[s_String] := Module[
     Return[TraditionalForm[Subscript[Style[base, Italic], Style[nativeLatexSymbolStringFA[sub], Italic]]]];
   ];
 
-  (* Superindice simple tipo x^{Im}. *)
+  (* Simple powers such as x^{Im}. *)
   m = StringCases[t,
     RegularExpression["^([A-Za-z0-9]+)\\^\\{([^{}]+)\\}$"] :>
       {"$1", "$2"}
@@ -759,6 +1336,15 @@ renderWCNotationFA[s_String, mode_:"Auto"] := Module[{latex, key, useMaTeX, rend
   rendered
 ];
 
+renderTranslationTargetFA[row_Association, mode_:"Auto"] := If[
+  StringContainsQ[Lookup[row, "Kind", ""], "not-mapped", IgnoreCase -> True],
+  Style[Lookup[row, "TargetExpression", "-"], Darker[Gray]],
+  renderWCNotationFA[
+    Lookup[row, "TargetLaTeX", Lookup[row, "TargetExpression", "-"]],
+    mode
+  ]
+];
+
 translationRowsWithLatexFA[rows_List] := addLatexColumnsFA /@ rows;
 
 translationRowsRenderedFA[rows_List, mode_:"Auto"] := Module[{rowsLatex},
@@ -768,10 +1354,7 @@ translationRowsRenderedFA[rows_List, mode_:"Auto"] := Module[{rowsLatex},
       renderWCNotationFA[Lookup[#, "SMEFTsimLaTeX", Lookup[#, "SMEFTsim", "-"]], mode],
       Lookup[#, "Target", "-"],
       Lookup[#, "TargetExpression", "-"],
-      renderWCNotationFA[Lookup[#, "TargetLaTeX", Lookup[#, "TargetExpression", "-"]], mode],
-      Lookup[#, "Class", "-"],
-      Lookup[#, "Kind", "-"],
-      Lookup[#, "Notes", "-"]
+      renderTranslationTargetFA[#, mode]
     } & /@ rowsLatex)
 ];
 
@@ -805,10 +1388,7 @@ translateFromSMEFTsimRenderedTable[wc_, target_:All, mode_:"Auto"] := Module[{ro
         "SMEFTsim notacion",
         "Destino",
         "Expresion destino",
-        "Destino notacion",
-        "Clase",
-        "Tipo",
-        "Notas"
+        "Destino notacion"
       }
     ],
     Frame -> All,
@@ -852,10 +1432,7 @@ translateWCListRenderedTable[wcs_List, target_:All, mode_:"Auto"] := Module[{nam
         "SMEFTsim notacion",
         "Destino",
         "Expresion destino",
-        "Destino notacion",
-        "Clase",
-        "Tipo",
-        "Notas"
+        "Destino notacion"
       }
     ],
     Frame -> All,
@@ -1032,7 +1609,7 @@ addOperatorColumnsFA[row_Association] := Module[{r, op},
 
 operatorTranslationsDataset[] := Dataset[addOperatorColumnsFA /@ $SMEFTsimWCTranslations][
   All,
-  {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}
+  {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX"}
 ];
 
 (* Override: from now on the standard LaTeX helpers also include operator columns. *)
@@ -1045,13 +1622,13 @@ wcTranslationsDatasetLatex[] := operatorTranslationsDataset[];
 
 translateFromSMEFTsimLatexTable[wc_, target_:All] := Dataset[translateFromSMEFTsimLatex[wc, target]][
   All,
-  {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}
+  {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX"}
 ];
 
 translateWCListLatexTable[wcs_List, target_:All] := Module[{names, rows},
   names = wcToString /@ wcs;
   rows = Flatten[translateFromSMEFTsimLatex[#, target] & /@ names, 1];
-  Dataset[rows][All, {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX", "Class", "Kind", "Notes"}]
+  Dataset[rows][All, {"SMEFTsim", "SMEFTsimLaTeX", "Operator", "OperatorLaTeX", "Target", "TargetExpression", "TargetLaTeX"}]
 ];
 
 exportWCTranslationsLatexCSV[path_:Automatic] := Module[{out, rows},
@@ -1059,7 +1636,7 @@ exportWCTranslationsLatexCSV[path_:Automatic] := Module[{out, rows},
     FileNameJoin[{NotebookDirectory[], "SMEFTsim_WC_traducciones_UFO_OPERADORES.csv"}],
     path
   ];
-  rows = Normal[addOperatorColumnsFA /@ $SMEFTsimWCTranslations] /. a_Association :> KeyDrop[a, "Aliases"];
+  rows = Normal[addOperatorColumnsFA /@ $SMEFTsimWCTranslations] /. a_Association :> KeyDrop[a, {"Aliases", "Class", "Kind", "Notes"}];
   Export[out, rows, "CSV"];
   out
 ];
@@ -1075,10 +1652,7 @@ translationRowsRenderedFA[rows_List, mode_:"Auto"] := Module[{rowsLatex},
       renderWCNotationFA[Lookup[#, "OperatorLaTeX", "-"], mode],
       Lookup[#, "Target", "-"],
       Lookup[#, "TargetExpression", "-"],
-      renderWCNotationFA[Lookup[#, "TargetLaTeX", Lookup[#, "TargetExpression", "-"]], mode],
-      Lookup[#, "Class", "-"],
-      Lookup[#, "Kind", "-"],
-      Lookup[#, "Notes", "-"]
+      renderTranslationTargetFA[#, mode]
     } & /@ rowsLatex)
 ];
 
@@ -1114,10 +1688,7 @@ translateFromSMEFTsimRenderedTable[wc_, target_:All, mode_:"Auto"] := Module[{ro
         "Operador notacion",
         "Destino",
         "Expresion destino",
-        "Destino notacion",
-        "Clase",
-        "Tipo",
-        "Notas"
+        "Destino notacion"
       }
     ],
     Frame -> All,
@@ -1163,10 +1734,7 @@ translateWCListRenderedTable[wcs_List, target_:All, mode_:"Auto"] := Module[{nam
         "Operador notacion",
         "Destino",
         "Expresion destino",
-        "Destino notacion",
-        "Clase",
-        "Tipo",
-        "Notas"
+        "Destino notacion"
       }
     ],
     Frame -> All,
@@ -1275,11 +1843,8 @@ translationRowsRenderedFullFA[rows_List, mode_:"Auto"] := Module[{rowsFull},
       renderWCNotationFA[Lookup[#, "LambdaOrder", "-"], mode],
       Lookup[#, "Target", "-"],
       Lookup[#, "TargetExpression", "-"],
-      renderWCNotationFA[Lookup[#, "TargetLaTeX", Lookup[#, "TargetExpression", "-"]], mode],
-      Lookup[#, "Class", "-"],
-      Lookup[#, "Kind", "-"],
-      Lookup[#, "Reference", "-"],
-      Lookup[#, "Notes", "-"]
+      renderTranslationTargetFA[#, mode],
+      Lookup[#, "Reference", "-"]
     } & /@ rowsFull)
 ];
 
@@ -1312,10 +1877,7 @@ translateWCListDetailedTable[wcs_List, target_:All, mode_:"Auto"] := Module[{nam
         "Destino",
         "Expresion destino",
         "Destino notacion",
-        "Clase",
-        "Tipo",
-        "Referencia",
-        "Notas"
+        "Referencia"
       }
     ],
     Frame -> All,
@@ -1325,21 +1887,17 @@ translateWCListDetailedTable[wcs_List, target_:All, mode_:"Auto"] := Module[{nam
   ]
 ];
 
-renderTargetCellForWCFA[wc_String, target_String, mode_:"Auto"] := Module[{rows, goodRows, exprs, latexes},
+renderTargetCellForWCFA[wc_String, target_String, mode_:"Auto"] := Module[{rows, goodRows, rendered},
   rows = translateFromSMEFTsim[wc, target];
   goodRows = Select[rows, ! KeyExistsQ[#, "Status"] &];
 
   If[goodRows === {}, Return[Style["-", Gray]]];
 
-  exprs = DeleteDuplicates[Lookup[addLatexColumnsFA /@ goodRows, "TargetExpression", "-"]];
-  latexes = DeleteDuplicates[Lookup[addLatexColumnsFA /@ goodRows, "TargetLaTeX", "-"]];
-
-  If[Length[latexes] == 1,
-    renderWCNotationFA[First[latexes], mode],
-    Column[renderWCNotationFA[#, mode] & /@ latexes]
-  ]
+  rendered = DeleteDuplicates[renderTranslationTargetFA[#, mode] & /@ (addLatexColumnsFA /@ goodRows)];
+  If[Length[rendered] == 1, First[rendered], Column[rendered]]
 ];
 
+(* Metadata is retained internally for lookup, filtering and bibliographic provenance; it is not shown in public tables or exports. *)
 classKindNotesForWCFA[wc_String, target_:All] := Module[{rows, goodRows},
   rows = If[target === All,
     Flatten[translateFromSMEFTsim /@ {wc}, 1],
@@ -1384,10 +1942,7 @@ translateWCListSummaryTable[wcs_List, target_:All, mode_:"Auto"] := Module[
       },
       renderTargetCellForWCFA[name, #, mode] & /@ targetList,
       {
-        Lookup[aux, "Class", "-"],
-        Lookup[aux, "Kind", "-"],
-        Lookup[aux, "Reference", "-"],
-        Lookup[aux, "Notes", "-"]
+        Lookup[aux, "Reference", "-"]
       }
     ],
     {name, names}
@@ -1404,10 +1959,7 @@ translateWCListSummaryTable[wcs_List, target_:All, mode_:"Auto"] := Module[
     },
     targetList,
     {
-      "Clase",
-      "Tipo",
-      "Referencia",
-      "Notas"
+      "Referencia"
     }
   ];
 
@@ -1463,6 +2015,8 @@ WCAyudaFunciones[] := Dataset[{
   <|"Funcion" -> "translateWCListRenderedTable[wcList, \"SMEFT@NLO\"]", "Uso" -> "Detalle filtrado a un destino concreto."|>,
   <|"Funcion" -> "wcCoverageReport[wcList]", "Uso" -> "Informe de cobertura: traducidos y faltantes."|>,
   <|"Funcion" -> "untranslatedWCs[wcList]", "Uso" -> "Lista de WCs sin traduccion."|>,
+  <|"Funcion" -> "exportWCTranslationsTeX[wcList, \"tabla.tex\"]", "Uso" -> "Exporta un documento .tex compilable con tabla resumen. Es independiente de la interfaz."|>,
+  <|"Funcion" -> "exportWCTranslationsTeX[wcList, \"tabla.tex\", \"TableType\" -> \"Both\"]", "Uso" -> "Exporta las tablas resumen y detallada en el mismo .tex."|>,
   <|"Funcion" -> "WCBibliografia[]", "Uso" -> "Bibliografia usada para traducciones, operadores y ordenes de Lambda."|>
 }];
 

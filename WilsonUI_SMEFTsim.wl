@@ -515,77 +515,192 @@ safeSimplifyFA[expr_, mode_: "Light", seconds_: 30] := Module[
 
 (* ===================== COEFICIENTES DE WILSON ===================== *)
 
+(*
+  WC2 contiene exclusivamente los parametros externos e independientes del
+  modelo. No se incorporan los aliases internos complejos de M$IntParams,
+  porque no son grados de libertad adicionales: por ejemplo
+
+      ctH = ctHRe + I ctHIm .
+
+  Esto es importante tanto para el filtro lineal como para la extraccion de
+  resultados: contar simultaneamente ctHRe, ctHIm y ctH como WCs distintos
+  puede producir falsos grados cuadraticos o resultados duplicados.
+*)
 WCext = {};
 WCint = {};
 WC1 = {};
 WC2 = {};
+wcAliasRulesFA = {};
+wcRealComponentRulesFA = {};
+
+ClearAll[
+  wcQ,
+  wcLikeQ,
+  symbolFromModelNameFA,
+  complexWCBaseNamesFA,
+  buildWCModelAliasRulesFA,
+  normalizarWCsModeloFA,
+  cpViolatingWCQFA,
+  imaginaryWCComponentQFA
+];
 
 wcQ[x_] := MemberQ[WC2, x];
 
-(* Igual que wcQ pero reconoce tambi\[EAcute]n WCs conjugados: Conjugate[WC] y
-  ComplexConjugate[WC]. Se usa al truncar |M|^2 a t\[EAcute]rminos lineales en los
-  coeficientes de Wilson (interferencia con el SM), eliminando los productos
-  cuadr\[AAcute]ticos C_i C_j y C_i Conjugate[C_j]. *)
+(* Igual que wcQ pero reconoce las tres convenciones de conjugacion que
+  pueden aparecer antes o despues de FCFAConvert. *)
 wcLikeQ[s_Symbol] := wcQ[s];
+wcLikeQ[HC[s_]] := wcQ[s];
 wcLikeQ[Conjugate[s_]] := wcQ[s];
 wcLikeQ[ComplexConjugate[s_]] := wcQ[s];
 wcLikeQ[_] := False;
 
+(* Construye de manera controlada el simbolo que FeynArts usa en el .mod.
+  Los nombres proceden exclusivamente de M$ExtParams ya cargado, por lo que
+  no se evalua texto arbitrario introducido por el usuario. *)
+symbolFromModelNameFA[name_String] := If[
+  StringMatchQ[name, RegularExpression["^[A-Za-z$][A-Za-z0-9$]*$"]],
+  Symbol[name],
+  $Failed
+];
+
+(* Bases complejas que el modelo parametriza mediante pares baseRe/baseIm. *)
+complexWCBaseNamesFA[] := Module[{names, candidateBases},
+  names = SymbolName /@ WC2;
+  candidateBases = DeleteDuplicates @ (
+    StringReplace[
+      Select[names, StringEndsQ[#, "Re"] || StringEndsQ[#, "Im"] &],
+      RegularExpression["(Re|Im)$"] -> ""
+    ]
+  );
+  Select[
+    candidateBases,
+    MemberQ[names, # <> "Re"] && MemberQ[names, # <> "Im"] &
+  ]
+];
+
+(*
+  SMEFTsim usa pares externos Re/Im para los WCs complejos, mientras que el
+  .mod puede contener el alias complejo correspondiente. Esto incluye la
+  inconsistencia exportada ctH/ctHH: el .mod usa ctH y los parametros de
+  entrada son ctHRe y ctHIm. Las reglas se derivan de los pares Re/Im, por
+  tanto corrigen ctH sin codificar una lista fragil de casos especiales.
+*)
+buildWCModelAliasRulesFA[] := Module[
+  {bases, triples, hcRules, ccRules, conjRules, bareRules},
+
+  bases = complexWCBaseNamesFA[];
+  triples = DeleteCases[
+    Function[base,
+      Module[{raw, rePart, imPart},
+        raw = symbolFromModelNameFA[base];
+        rePart = SelectFirst[WC2, SymbolName[#] === base <> "Re" &, Missing["NoRe"]];
+        imPart = SelectFirst[WC2, SymbolName[#] === base <> "Im" &, Missing["NoIm"]];
+        If[raw === $Failed || MissingQ[rePart] || MissingQ[imPart],
+          Nothing,
+          {raw, rePart, imPart}
+        ]
+      ]
+    ] /@ bases,
+    Nothing
+  ];
+
+  (* Las reglas de HC/Conjugate deben preceder a la regla desnuda para que
+     HC[ctH] se convierta directamente en ctHRe - I ctHIm. *)
+  hcRules = (HoldPattern[HC[#[[1]]]] :> #[[2]] - I #[[3]] &) /@ triples;
+  ccRules = (HoldPattern[ComplexConjugate[#[[1]]]] :> #[[2]] - I #[[3]] &) /@ triples;
+  conjRules = (HoldPattern[Conjugate[#[[1]]]] :> #[[2]] - I #[[3]] &) /@ triples;
+  bareRules = (#[[1]] -> #[[2]] + I #[[3]] &) /@ triples;
+
+  wcAliasRulesFA = Join[hcRules, ccRules, conjRules, bareRules];
+
+  (* Re/Im son parametros de entrada reales. Esta identidad es estructural,
+     no una hipotesis adicional sobre CP. *)
+  wcRealComponentRulesFA = Join[
+    (HoldPattern[HC[#]] :> # &) /@ WC2,
+    (HoldPattern[ComplexConjugate[#]] :> # &) /@ WC2,
+    (HoldPattern[Conjugate[#]] :> # &) /@ WC2
+  ];
+];
+
+normalizarWCsModeloFA[expr_] := Module[{rules},
+  rules = Join[wcAliasRulesFA, wcRealComponentRulesFA];
+  If[rules === {},
+    expr,
+    Quiet @ Check[expr /. rules, expr]
+  ]
+];
+
+cpViolatingWCQFA[wc_] := Module[{n = SymbolName[Unevaluated[wc]]},
+  StringEndsQ[n, "Im"] || StringEndsQ[n, "til"]
+];
+
+(* "WCs reales" en esta parametrizacion equivale a anular las componentes
+   independientes que terminan en Im. Los operadores con sufijo til no se
+   anulan aqui: son CP-odd pero sus coeficientes son parametros reales. *)
+imaginaryWCComponentQFA[wc_] := StringEndsQ[SymbolName[Unevaluated[wc]], "Im"];
+
 cargarParametrosModeloFA[model_] := Module[
   {m, parsFile, coefNamesExtLocal, coefNamesIntLocal},
-  
+
   m = limpiarNombreFA[model, ".mod"];
   parsFile = ficheroFA[m, ".pars"];
-  
+
   If[! StringQ[parsFile],
-  WCext = {};
-  WCint = {};
-  WC1 = {};
-  WC2 = {};
-  Return[<|
-  "OK" -> False,
-  "Mensaje" -> "No se ha encontrado el fichero .pars del modelo. Los diagramas pueden generarse, pero no se podr\[AAcute]n extraer WCs autom\[AAcute]ticamente.",
-  "ParsFile" -> Missing["NoEncontrado"]
-  |>]
+    WCext = {};
+    WCint = {};
+    WC1 = {};
+    WC2 = {};
+    wcAliasRulesFA = {};
+    wcRealComponentRulesFA = {};
+    Return[<|
+      "OK" -> False,
+      "Mensaje" -> "No se ha encontrado el fichero .pars del modelo. Los diagramas pueden generarse, pero no se podran extraer WCs automaticamente.",
+      "ParsFile" -> Missing["NoEncontrado"]
+    |>]
   ];
-  
+
   Quiet @ Check[Get[parsFile],
-  WCext = {};
-  WCint = {};
-  WC1 = {};
-  WC2 = {};
-  Return[<|
-  "OK" -> False,
-  "Mensaje" -> "Se encontr\[OAcute] el fichero .pars, pero fall\[OAcute] su carga.",
-  "ParsFile" -> parsFile
-  |>]
+    WCext = {};
+    WCint = {};
+    WC1 = {};
+    WC2 = {};
+    wcAliasRulesFA = {};
+    wcRealComponentRulesFA = {};
+    Return[<|
+      "OK" -> False,
+      "Mensaje" -> "Se encontro el fichero .pars, pero fallo su carga.",
+      "ParsFile" -> parsFile
+    |>]
   ];
-  
+
   coefNamesExtLocal = If[ValueQ[M$ExtParams] && ListQ[M$ExtParams], First /@ M$ExtParams, {}];
   coefNamesIntLocal = If[ValueQ[M$IntParams] && ListQ[M$IntParams], First /@ M$IntParams, {}];
-  
+
   WCext = DeleteCases[coefNamesExtLocal,
-  aS | Gf | LambdaSMEFT | linearPropCorrections | MW | ymb | ymc |
-  ymdo | yme | ymm | yms | ymt | ymtau | ymup
+    aS | Gf | LambdaSMEFT | linearPropCorrections | MW | ymb | ymc |
+    ymdo | yme | ymm | yms | ymt | ymtau | ymup
   ];
-  
+
+  (* Se conserva la lista interna solo para diagnostico/documentacion. No se
+     mezcla con WC2: los alias internos se normalizan a parametros externos. *)
   WCint = DeleteCases[coefNamesIntLocal,
-  yup | yc | ydo | ys | yt | yb | MWsm | aEW | vevhat | lam | dkH |
-  cth | dMH2 | G | ee | ye | ym | ytau | dGf | vevT | barlam | vev |
-  sth2 | sth | dMZ2 | gw | g1 | dg1 | dgw | gwsh | g1sh | propCorr |
-  MZ1 | MW1 | MH1 | MT1 | WZ1 | WW1 | WH1 | WT1 | dWZ | dWW | dWH |
-  dWT | yt0 | yb0 | gHgg1 | gHgg2 | gHgg3 | gHgg4 | gHgg5 | gHaa |
-  gHza
+    yup | yc | ydo | ys | yt | yb | MWsm | aEW | vevhat | lam | dkH |
+    cth | dMH2 | G | ee | ye | ym | ytau | dGf | vevT | barlam | vev |
+    sth2 | sth | dMZ2 | gw | g1 | dg1 | dgw | gwsh | g1sh | propCorr |
+    MZ1 | MW1 | MH1 | MT1 | WZ1 | WW1 | WH1 | WT1 | dWZ | dWW | dWH |
+    dWT | yt0 | yb0 | gHgg1 | gHgg2 | gHgg3 | gHgg4 | gHgg5 | gHaa |
+    gHza
   ];
-  
-  WC1 = Join[WCext, WCint];
+
+  WC1 = WCext;
   WC2 = DeleteDuplicates[WC1];
-  
+  buildWCModelAliasRulesFA[];
+
   <|
-  "OK" -> True,
-  "Mensaje" -> "Par\[AAcute]metros del modelo cargados correctamente.",
-  "ParsFile" -> parsFile,
-  "NumeroWC" -> Length[WC2]
+    "OK" -> True,
+    "Mensaje" -> "Parametros del modelo cargados correctamente.",
+    "ParsFile" -> parsFile,
+    "NumeroWC" -> Length[WC2]
   |>
 ];
 
@@ -605,7 +720,7 @@ cargarParametrosModeloFA["SMEFTsimtopU3l"];
 
   Reglas disponibles:
   - CP: pone a cero s\[IAcute]mbolos terminados en Im o til.
-  - WCs reales: ComplexConjugate[WC] -> WC.
+  - WCs reales: anula los parametros independientes terminados en Im; las conjugaciones de componentes Re/Im se normalizan de forma estructural.
   - Leptones sin masa: anula masas y Yukawas lept\[OAcute]nicos (l\[IAcute]mite de alta energ\[IAcute]a).
   - Lineal en WCs: conserva solo grado <= 1 en WCs (interferencia con el SM).
   Se aplica la \[UAcute]ltima y como selecci\[OAcute]n de t\[EAcute]rminos por grado (r\[AAcute]pido).
@@ -641,21 +756,21 @@ ClearAll[
   Top-sector no es un filtro posterior de resultados. Cuando se activa,
   los WCs que no pertenecen al sector top se ponen a cero ANTES de construir
   |M|^2. Esto reproduce la idea de trabajar con un submodelo/restriction card:
-  la amplitud se genera y procesa dentro del espacio de par\[AAcute]metros elegido.
+  la amplitud se genera y procesa dentro del espacio de parametros elegido.
 
-  Criterio pr\[AAcute]ctico para SMEFTsim top/topU3l:
-  - cHQ*, cHt*, cHb, cHtb*  : corrientes Higgs-top/bottom pesadas
-  - ct*  : top Yukawa/dipolos/four-fermion con t_R
-  - cQ*  : operadores con doblete pesado Q
-  Se excluyen autom\[AAcute]ticamente bos\[OAcute]nicos universales (cHbox, cHDD, cHWB),
-  lept\[OAcute]nicos puros (cHl*, cHe*, ceB, ceW, ceH) y escalares/tensores
-  semilept\[OAcute]nicos cle* que no pertenecen al subespacio vectorial top.
+  Criterio practico para SMEFTsim top/topU3l:
+  - cHQ*, cHt*, cHbq, cHtb* : corrientes Higgs-top/bottom pesadas
+  - ct*                    : top Yukawa/dipolos/four-fermion con t_R
+  - cQ*                    : operadores con doblete pesado Q
+  Se excluyen automaticamente bosonicos universales (cHbox, cHDD, cHWB),
+  leptonicos puros (cHl*, cHe*, ceB, ceW, ceH) y escalares/tensores
+  semileptonicos cle* que no pertenecen al subespacio vectorial top.
 *)
 
 topSectorWCQFA[wc_] := Module[{n = SymbolName[Unevaluated[wc]]},
   StringStartsQ[n, "cHQ"] ||
   StringStartsQ[n, "cHt"] ||
-  n === "cHb" ||
+  n === "cHbq" ||
   StringStartsQ[n, "cHtb"] ||
   StringStartsQ[n, "ct"] ||
   StringStartsQ[n, "cQ"]
@@ -668,59 +783,56 @@ activeWCsFA[] := If[TrueQ[useTopSectorRules], topSectorWCsFA[], WC2];
 inactiveTopSectorWCRulesFA[] := Module[{inactive},
   inactive = Complement[WC2, topSectorWCsFA[]];
   Join[
-  Thread[inactive -> 0],
-  Thread[(ComplexConjugate /@ inactive) -> 0],
-  Thread[(Conjugate /@ inactive) -> 0]
+    Thread[inactive -> 0],
+    Thread[(HC /@ inactive) -> 0],
+    Thread[(ComplexConjugate /@ inactive) -> 0],
+    Thread[(Conjugate /@ inactive) -> 0]
   ]
 ];
 
 restrictToActiveWCSectorFA[expr_] := If[TrueQ[useTopSectorRules],
-  Quiet @ Check[expr /. inactiveTopSectorWCRulesFA[], expr],
-  expr
+  Quiet @ Check[normalizarWCsModeloFA[expr] /. inactiveTopSectorWCRulesFA[], expr],
+  normalizarWCsModeloFA[expr]
 ];
 
 (* Grado total en WCs de un monomio: suma de exponentes de los factores que son
-  WCs (o WCs conjugados). Cuenta tanto C_i C_j como C_i^2. *)
+   WCs (o WCs conjugados). Cuenta tanto C_i C_j como C_i^2. *)
 wcDegreeFA[term_] := Module[{factors},
   factors = If[Head[term] === Times, List @@ term, {term}];
   Total[
-  Map[
-  Function[f,
-  Which[
-  wcLikeQ[f], 1,
-  MatchQ[f, Power[g_, n_Integer] /; (Positive[n] && wcLikeQ[g])], f[[2]],
-  True, 0
-  ]
-  ],
-  factors
-  ]
+    Map[
+      Function[f,
+        Which[
+          wcLikeQ[f], 1,
+          MatchQ[f, Power[g_, n_Integer] /; (Positive[n] && wcLikeQ[g])], f[[2]],
+          True, 0
+        ]
+      ],
+      factors
+    ]
   ]
 ];
 
 (* Truncamiento lineal en WCs (interferencia SM x dim-6): conserva solo los
-  monomios con grado en WCs <= 1. Implementado como selecci\[OAcute]n de t\[EAcute]rminos en
-  tiempo lineal sobre la expresi\[OAcute]n expandida, en vez del emparejador
-  combinatorio Times[a_,b_] con //., que era el cuello de botella. *)
+   monomios con grado en WCs <= 1. Implementado como seleccion de terminos en
+   tiempo lineal sobre la expresion expandida. *)
 keepLinearWCFA[expr_, seconds_: 20] := Module[{sec, res},
   sec = Quiet @ Check[N[seconds], 20];
   If[! NumericQ[sec] || sec <= 0, sec = 20];
 
-  (* La selecci\[OAcute]n por grado exige Expand. Para evitar abortos en expresiones muy
-  grandes, si expira se devuelve la expresi\[OAcute]n original y la extracci\[OAcute]n ser\[AAcute]
-  conservadora/sobre-inclusiva, pero no bloquear\[AAcute] el kernel. *)
   res = TimeConstrained[
-  Quiet @ Check[
-  Module[{e},
-  e = Expand[expr];
-  If[Head[e] === Plus,
-  Total @ Select[List @@ e, wcDegreeFA[#] <= 1 &],
-  If[wcDegreeFA[e] <= 1, e, 0]
-  ]
-  ],
-  expr
-  ],
-  sec,
-  expr
+    Quiet @ Check[
+      Module[{e},
+        e = Expand[normalizarWCsModeloFA[expr]];
+        If[Head[e] === Plus,
+          Total @ Select[List @@ e, wcDegreeFA[#] <= 1 &],
+          If[wcDegreeFA[e] <= 1, e, 0]
+        ]
+      ],
+      expr
+    ],
+    sec,
+    expr
   ];
 
   res
@@ -728,74 +840,84 @@ keepLinearWCFA[expr_, seconds_: 20] := Module[{sec, res},
 
 buildSymmetryRules[] := Module[
   {
-  cpRulesLocal,
-  realRulesLocal,
-  leptonMasslessRulesLocal,
-  topSectorRulesLocal
+    cpOddWCs,
+    imagWCs,
+    cpRulesLocal,
+    realRulesLocal,
+    leptonMasslessRulesLocal,
+    topSectorRulesLocal
   },
 
-  cpRulesLocal = {
-  s_Symbol /; StringEndsQ[SymbolName[s], "Im"] :> 0,
-  s_Symbol /; StringEndsQ[SymbolName[s], "til"] :> 0
-  };
+  (* Se limita CP a WCs independientes del modelo. Asi no se altera por
+     nombre ningun simbolo cinemático o auxiliar ajeno a SMEFTsim. *)
+  cpOddWCs = Select[WC2, cpViolatingWCQFA];
+  imagWCs = Select[WC2, imaginaryWCComponentQFA];
 
-  realRulesLocal = {
-  ComplexConjugate[s_Symbol] /; wcQ[s] :> s,
-  Conjugate[s_Symbol] /; wcQ[s] :> s
-  };
+  cpRulesLocal = Join[
+    Thread[cpOddWCs -> 0],
+    Thread[(HC /@ cpOddWCs) -> 0],
+    Thread[(ComplexConjugate /@ cpOddWCs) -> 0],
+    Thread[(Conjugate /@ cpOddWCs) -> 0]
+  ];
 
-  (* Leptones sin masa (l\[IAcute]mite de alta energ\[IAcute]a): se anulan las masas y los
-  Yukawas de los leptones cargados (y las masas de neutrinos). Cubre tanto los
-  s\[IAcute]mbolos nombrados del modelo SMEFTsim (yme, ymm, ymtau, ye, ym, ytau) como
-  la masa gen\[EAcute]rica de FeynArts Mass[F[2,{_}]] / Mass[F[1,{_}]], por si tras
-  FCFAConvert la masa del espinor aparece en una u otra forma.
-  Para otro modelo con otros nombres de masa lept\[OAcute]nica, ampliar esta lista. *)
-  (* Masas lept\[OAcute]nicas en los espinores de este modelo, confirmadas con
-  Cases[amp, _Spinor, Infinity]: electr\[OAcute]n Me, mu\[OAcute]n MMU, tau MTA.
-  Se incluyen tambi\[EAcute]n los Yukawas (yme/ye...) y la masa gen\[EAcute]rica
-  Mass[F[2,{_}]] por robustez frente a otras cargas del modelo. *)
+  (* En SMEFTsim los WCs complejos se introducen como pares Re/Im. Imponer
+     WCs reales significa fijar a cero solo los parametros independientes Im;
+     no elimina los operadores CP-odd reales de tipo c...til. *)
+  realRulesLocal = Join[
+    Thread[imagWCs -> 0],
+    Thread[(HC /@ imagWCs) -> 0],
+    Thread[(ComplexConjugate /@ imagWCs) -> 0],
+    Thread[(Conjugate /@ imagWCs) -> 0]
+  ];
+
+  (* Leptones sin masa (limite de alta energia): se anulan las masas y los
+     Yukawas de los leptones cargados. F[1] son neutrinos sin masa; F[2] son
+     leptones cargados en SMEFTsimtopU3l, segun M$ClassesDescription. *)
   leptonMasslessRulesLocal = {
-  Me -> 0, MMU -> 0, MTA -> 0,
-  yme -> 0, ymm -> 0, ymtau -> 0,
-  ye -> 0, ym -> 0, ytau -> 0,
-  Mass[F[2, {_}]] -> 0,
-  Mass[F[1, {_}]] -> 0,
-  Mass[F[2, {_}, ___]] -> 0,
-  Mass[F[1, {_}, ___]] -> 0
+    Me -> 0, MMU -> 0, MTA -> 0,
+    yme -> 0, ymm -> 0, ymtau -> 0,
+    ye -> 0, ym -> 0, ytau -> 0,
+    (* En SMEFTsimtopU3l los vertices con leptones usan la matriz
+       de Yukawa indexada yl[i,j], no solo los eigenvalores ye/ym/ytau. *)
+    HoldPattern[yl[___]] :> 0,
+    Mass[F[2, {_}]] -> 0,
+    Mass[F[1, {_}]] -> 0,
+    Mass[F[2, {_}, ___]] -> 0,
+    Mass[F[1, {_}, ___]] -> 0
   };
 
   topSectorRulesLocal = inactiveTopSectorWCRulesFA[];
 
   <|
-  "CP" -> cpRulesLocal,
-  "Real" -> realRulesLocal,
-  "LeptonMassless" -> leptonMasslessRulesLocal,
-  "TopSector" -> topSectorRulesLocal
+    "CP" -> cpRulesLocal,
+    "Real" -> realRulesLocal,
+    "LeptonMassless" -> leptonMasslessRulesLocal,
+    "TopSector" -> topSectorRulesLocal
   |>
 ];
 
-applySelectedSymmetries[expr_, skipLinear_: False] := Module[{tmp = expr, rules},
+applySelectedSymmetries[expr_, skipLinear_: False] := Module[{tmp, rules},
+  tmp = normalizarWCsModeloFA[expr];
   rules = buildSymmetryRules[];
 
-  If[useCpRules, tmp = tmp //. rules["CP"]];
-  If[useRealRules, tmp = tmp //. rules["Real"]];
   If[useMasslessLeptonRules, tmp = tmp /. rules["LeptonMassless"]];
+  If[useCpRules, tmp = tmp /. rules["CP"]];
+  If[useRealRules, tmp = tmp /. rules["Real"]];
   If[useTopSectorRules, tmp = tmp /. rules["TopSector"]];
 
   (* Si |M|^2 se ha construido ya como interferencia lineal SM x dim-6, no se
-  vuelve a aplicar la linealidad: evitar\[IAcute]a un Expand enorme y duplicado. *)
+     vuelve a aplicar la linealidad: evitaria un Expand enorme y duplicado. *)
   If[useLinearWCRules && ! TrueQ[skipLinear],
-  tmp = keepLinearWCFA[tmp, 20]
+    tmp = keepLinearWCFA[tmp, 20]
   ];
 
   tmp
 ];
 
-(* Detecci\[OAcute]n de aparici\[OAcute]n de WCs en una amplitud procesada.
-  Se mantiene la versi\[OAcute]n compatible con conjugados para no perder WCs
-  si el usuario no activa la hip\[OAcute]tesis de WCs reales. *)
+(* Deteccion de aparicion de WCs en una amplitud procesada. *)
 wcAppearsInExprFA[expr_, wc_] :=
   ! FreeQ[expr, wc] ||
+  ! FreeQ[expr, HC[wc]] ||
   ! FreeQ[expr, ComplexConjugate[wc]] ||
   ! FreeQ[expr, Conjugate[wc]];
 
@@ -906,62 +1028,66 @@ externalVectorDataFA[fields_List, momenta_List] := DeleteCases[
   Nothing
 ];
 
-zeroAllWCsFA[expr_] := Quiet @ Check[
-  expr /. Join[
-  Thread[WC2 -> 0],
-  Thread[(ComplexConjugate /@ WC2) -> 0],
-  Thread[(Conjugate /@ WC2) -> 0]
-  ],
-  expr
+zeroAllWCsFA[expr_] := Module[{tmp},
+  tmp = normalizarWCsModeloFA[expr];
+  Quiet @ Check[
+    tmp /. Join[
+      Thread[WC2 -> 0],
+      Thread[(HC /@ WC2) -> 0],
+      Thread[(ComplexConjugate /@ WC2) -> 0],
+      Thread[(Conjugate /@ WC2) -> 0]
+    ],
+    tmp
+  ]
 ];
 
-preprocessAmplitudeForM2FA[amp_] := Module[{tmp = amp, rules},
+preprocessAmplitudeForM2FA[amp_] := Module[{tmp, rules},
+  tmp = normalizarWCsModeloFA[amp];
   rules = buildSymmetryRules[];
 
   (* Reglas baratas antes de construir productos grandes. *)
   If[useMasslessLeptonRules, tmp = tmp /. rules["LeptonMassless"]];
-  If[useCpRules, tmp = tmp //. rules["CP"]];
-  If[useRealRules, tmp = tmp //. rules["Real"]];
-  If[useTopSectorRules, tmp = tmp /. rules["TopSector"]];
-
-  If[useMasslessLeptonRules, tmp = tmp /. rules["LeptonMassless"]];
+  If[useCpRules, tmp = tmp /. rules["CP"]];
+  If[useRealRules, tmp = tmp /. rules["Real"]];
   If[useTopSectorRules, tmp = tmp /. rules["TopSector"]];
 
   tmp
 ];
 
 linearAmplitudePartFA[amp_, seconds_: 20] := Module[
-  {sec, eps, rules, res, sm},
+  {sec, eps, rules, res, sm, tmpAmp},
   sec = Quiet @ Check[N[seconds], 20];
   If[! NumericQ[sec] || sec <= 0, sec = 20];
 
-  sm = zeroAllWCsFA[amp];
+  tmpAmp = normalizarWCsModeloFA[amp];
+  sm = zeroAllWCsFA[tmpAmp];
   eps = Unique["epsWC$"];
 
   rules = Join[
-  Thread[activeWCsFA[] -> eps activeWCsFA[]],
-  Thread[(ComplexConjugate /@ activeWCsFA[]) -> eps (ComplexConjugate /@ activeWCsFA[])],
-  Thread[(Conjugate /@ activeWCsFA[]) -> eps (Conjugate /@ activeWCsFA[])]
+    Thread[activeWCsFA[] -> eps activeWCsFA[]],
+    Thread[(HC /@ activeWCsFA[]) -> eps (HC /@ activeWCsFA[])],
+    Thread[(ComplexConjugate /@ activeWCsFA[]) -> eps (ComplexConjugate /@ activeWCsFA[])],
+    Thread[(Conjugate /@ activeWCsFA[]) -> eps (Conjugate /@ activeWCsFA[])]
   ];
 
   res = TimeConstrained[
-  Quiet @ Check[
-  Module[{tmp},
-  tmp = amp /. rules;
-  (* Series suele ser m\[AAcute]s barato que expandir toda la amplitud cuadrada. *)
-  Coefficient[Normal @ Series[tmp, {eps, 0, 1}], eps, 1] /. eps -> 1
-  ],
-  $Failed
-  ],
-  sec,
-  $TimedOut
+    Quiet @ Check[
+      Module[{tmp},
+        tmp = tmpAmp /. rules;
+        (* Series suele ser mas barato que expandir toda la amplitud cuadrada. *)
+        Coefficient[Normal @ Series[tmp, {eps, 0, 1}], eps, 1] /. eps -> 1
+      ],
+      $Failed
+    ],
+    sec,
+    $TimedOut
   ];
 
   If[res === $TimedOut || res === $Failed || res === $Aborted,
-  (* En SMEFTsim a \[AAcute]rbol cada inserci\[OAcute]n NP es lineal en un WC. Como fallback,
-  amp - SM es conservador y evita abortar. *)
-  Quiet @ Check[amp - sm, amp],
-  res
+    (* En SMEFTsim a arbol cada insercion NP es lineal en un WC. Como fallback,
+       amp - SM es conservador y evita abortar. *)
+    Quiet @ Check[tmpAmp - sm, tmpAmp],
+    res
   ]
 ];
 
@@ -1094,7 +1220,7 @@ physicalM2ChunkedLinearFA[
   smTerms = exprTermsFA[ampSM];
   smConjTerms = ComplexConjugate /@ smTerms;
 
-  candidateWCs = Select[activeWCsFA[], ! FreeQ[ampLin, #] || ! FreeQ[ampLin, ComplexConjugate[#]] || ! FreeQ[ampLin, Conjugate[#]] &];
+  candidateWCs = Select[activeWCsFA[], ! FreeQ[ampLin, #] || ! FreeQ[ampLin, HC[#]] || ! FreeQ[ampLin, ComplexConjugate[#]] || ! FreeQ[ampLin, Conjugate[#]] &];
   candidateWCs = SortBy[DeleteDuplicates[candidateWCs], SymbolName];
 
   $lastM2PhysicalCandidates = SymbolName /@ candidateWCs;
@@ -1490,7 +1616,7 @@ mostrarGuiaUso[] := CreateDialog[
   Row[{Style["CP conservante", Bold], ": pone a cero WCs CP-violantes detectados en la lista WC2, por ejemplo nombres terminados en Im o til."}]
   ],
   guiaBulletFA[
-  Row[{Style["WCs reales", Bold], ": aplica reglas del tipo ", guiaCodeFA["ComplexConjugate[WC] -> WC"], "."}]
+  Row[{Style["WCs reales", Bold], ": anula las componentes independientes terminadas en ", guiaCodeFA["Im"], ". Las conjugaciones de Re/Im se simplifican estructuralmente."}]
   ],
   guiaBulletFA[
   Row[{Style["Lineal en WCs", Bold], ": conserva solo los t\[EAcute]rminos de grado <= 1 en los coeficientes de Wilson, es decir la interferencia SM x dim-6. Se aplica la \[UAcute]ltima y selecciona t\[EAcute]rminos por su grado en WCs (r\[AAcute]pido). Sobre |M|^2 elimina los t\[EAcute]rminos cuadr\[AAcute]ticos C_i C_j y C_i^2."}]
@@ -1697,7 +1823,7 @@ mostrarGuiaModificaciones[] := CreateDialog[
   "5. Modificar WCs reales y linealizaci\[OAcute]n",
   {
   guiaBulletFA[
-  Row[{guiaCodeFA["realRulesLocal dentro de buildSymmetryRules[]"], " aplica ", guiaCodeFA["ComplexConjugate[WC] -> WC"], " y ", guiaCodeFA["Conjugate[WC] -> WC"], " para cada WC de WC2."}]
+  Row[{guiaCodeFA["realRulesLocal dentro de buildSymmetryRules[]"], " anula los WCs independientes terminados en ", guiaCodeFA["Im"], ". Las conjugaciones de las componentes Re/Im se tratan en ", guiaCodeFA["normalizarWCsModeloFA"], "."}]
   ],
   guiaBulletFA[
   Row[{guiaCodeFA["linearWCRulesLocal dentro de buildSymmetryRules[]"], " elimina productos simples ", guiaCodeFA["WC_i WC_j"], " mediante una regla r\[AAcute]pida."}]
@@ -3182,7 +3308,7 @@ mostrarGuiaUso[] := CreateDialog[
   }, False],
   guiaOpenFA["4. Reglas fisicas y sector activo", {
   guiaBulletFA[Row[{Style["CP conservante", Bold], ": anula coeficientes imaginarios y CP-odd identificados por la notacion del modelo."}]],
-  guiaBulletFA[Row[{Style["WCs reales", Bold], ": aplica ", guiaCodeFA["ComplexConjugate[WC] -> WC"], " y ", guiaCodeFA["Conjugate[WC] -> WC"], "."}]],
+  guiaBulletFA[Row[{Style["WCs reales", Bold], ": anula las componentes independientes terminadas en ", guiaCodeFA["Im"], "."}]],
   guiaBulletFA[Row[{Style["Lineal en WCs", Bold], ": conserva la interferencia SM x dim-6, es decir, terminos de orden Lambda^-2; elimina/sortea los productos C_i C_j de orden Lambda^-4."}]],
   guiaBulletFA[Row[{Style["Leptones sin masa", Bold], ": aplica m_l -> 0 y Yukawas leptonicas -> 0. No elimina corrientes vectoriales leptonicas."}]],
   guiaBulletFA[Row[{Style["Top-sector", Bold], ": restringe los WCs activos antes del calculo al sector top. No es un filtrado posterior; equivale a usar un submodelo/restriction card."}]],
@@ -3239,13 +3365,13 @@ mostrarGuiaModificaciones[] := CreateDialog[
   guiaBulletFA[Row[{"El criterio Top-sector esta en ", guiaCodeFA["topSectorWCQFA[wc_]"], "."}]],
   guiaBulletFA[Row[{"La lista activa la devuelve ", guiaCodeFA["activeWCsFA[]"], ". Todas las busquedas deben usar esta funcion, no WC2 directamente, salvo para poner a cero todo en el limite SM."}]],
   guiaBulletFA[Row[{"Los WCs inactivos se anulan con ", guiaCodeFA["inactiveTopSectorWCRulesFA[]"], " mediante ", guiaCodeFA["restrictToActiveWCSectorFA"], "."}]],
-  guiaWarnFA["Cuidado con prefijos ambiguos: por ejemplo cHb no debe capturar cHbox. Por eso se usa n === \"cHb\"."]
+  guiaWarnFA["Cuidado con prefijos ambiguos: por ejemplo cHbq no debe capturar cHbox. Por eso se usa n === \"cHbq\"."]
   }, True],
   guiaOpenFA["4. Reglas fisicas", {
   guiaBulletFA[Row[{"Las reglas se crean en ", guiaCodeFA["buildSymmetryRules[]"], " y se aplican en ", guiaCodeFA["applySelectedSymmetries[expr, skipLinear]"], "."}]],
-  guiaBulletFA[Row[{"CP: por defecto anula simbolos que terminan en ", guiaCodeFA["Im"], " o ", guiaCodeFA["til"], "."}]],
-  guiaBulletFA[Row[{"WCs reales: usa reglas para ", guiaCodeFA["ComplexConjugate"], " y ", guiaCodeFA["Conjugate"], "."}]],
-  guiaBulletFA[Row[{"Leptones sin masa: revisa ", guiaCodeFA["leptonMasslessRulesLocal"], " si otro modelo usa nombres distintos para masas/Yukawas."}]],
+  guiaBulletFA[Row[{"CP: por defecto anula WCs independientes que terminan en ", guiaCodeFA["Im"], " o ", guiaCodeFA["til"], "."}]],
+  guiaBulletFA[Row[{"WCs reales: anula los WCs independientes terminados en ", guiaCodeFA["Im"], ". Las conjugaciones de Re/Im se normalizan automaticamente."}]],
+  guiaBulletFA[Row[{"Leptones sin masa: revisa ", guiaCodeFA["leptonMasslessRulesLocal"], " si otro modelo usa nombres distintos para masas, eigenvalores Yukawa o matrices Yukawa indexadas."}]],
   guiaBulletFA[Row[{"Linealidad: ", guiaCodeFA["keepLinearWCFA"], " cuenta el grado en WCs y conserva grado <= 1."}]],
   guiaWarnFA["No uses reglas globales con //., Times[a_,b_], etc. en expresiones grandes: pueden explotar combinatoriamente."]
   }, False],
