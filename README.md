@@ -38,7 +38,7 @@ asociado a cada uno y los renderiza en LaTeX.
 
 | Componente | Necesario | Notas |
 |---|---|---|
-| Wolfram Mathematica | Sí | Probada en la versión 15.0. |
+| Wolfram Mathematica | Sí | Probada en la versión 14.3. |
 | FeynCalc | Sí | Se carga junto con el add-on FeynArts. |
 | FeynArts | Sí | Se carga automáticamente como add-on de FeynCalc. |
 | Modelo SMEFTsim `topU3l` | Sí | Incluido en `Models/` (`.mod`, `.gen`, `.pars`). |
